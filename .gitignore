@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+k4f.egg-info/
+dist/
+build/
+*.egg
+*.ignore
+test_*
