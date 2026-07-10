@@ -181,6 +181,38 @@ print(chat_info)
 
 ---
 
+### rename chat
+
+```python
+result = await api.rename_chat(chat_id, "New Chat Name")
+print(result)
+```
+
+---
+
+### delete chat
+
+```python
+result = await api.delete_chat(chat_id)
+print(result)
+```
+
+---
+
+### list feeds (conversations)
+
+```python
+items = await api.list_feeds(page_size=20)
+for item in items:
+    chat = item["chat"]
+    print(f"{chat['name']} ({chat['id']})")
+```
+
+> [!NOTE]
+> By default, `list_feeds` returns both chats and tasks. Pass `filter_types=["FEED_TYPE_CHAT"]` to get only chats.
+
+---
+
 ### list messages
 
 ```python

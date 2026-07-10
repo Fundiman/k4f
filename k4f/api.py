@@ -10,6 +10,9 @@ BASE_URL = "https://www.kimi.com"
 FILES_BASE = "https://www.kimi.com/apiv2-files"
 CHAT_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/Chat"
 GET_CHAT_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/GetChat"
+UPDATE_CHAT_ENDPOINT = "/apiv2/kimi.chat.v1.ChatService/UpdateChat"
+DELETE_CHAT_ENDPOINT = "/apiv2/kimi.chat.v1.ChatService/DeleteChat"
+LIST_FEEDS_ENDPOINT = "/apiv2/kimi.gateway.feed.v1.FeedService/ListFeeds"
 LIST_MSGS_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages"
 FILE_UPLOAD_ENDPOINT = "/apiv2-files/file/upload"
 FILE_PARSE_PROGRESS_ENDPOINT = "/apiv2-files/kimi.gateway.file.v1.FileService/GetFileParseProgress"
@@ -242,6 +245,44 @@ class KimiAPI:
             GET_CHAT_ENDPOINT,
             referer,
         )
+
+    async def rename_chat(self, chat_id: str, name: str) -> dict:
+        referer = f"{BASE_URL}/chat/{chat_id}"
+        return await self._send_json(
+            {"chat": {"id": chat_id, "name": name}},
+            UPDATE_CHAT_ENDPOINT,
+            referer,
+        )
+
+    async def delete_chat(self, chat_id: str) -> dict:
+        referer = f"{BASE_URL}/chat/{chat_id}"
+        return await self._send_json(
+            {"chat_id": chat_id},
+            DELETE_CHAT_ENDPOINT,
+            referer,
+        )
+
+    async def list_feeds(
+        self,
+        page_size: int = 15,
+        project_id: str = "",
+        filter_types: Optional[List[str]] = None,
+        include_pinned: bool = False,
+    ) -> List[dict]:
+        if filter_types is None:
+            filter_types = ["FEED_TYPE_CHAT", "FEED_TYPE_TASK"]
+        referer = f"{BASE_URL}/"
+        data = await self._send_json(
+            {
+                "page_size": page_size,
+                "project_id": project_id,
+                "filter_types": filter_types,
+                "include_pinned": include_pinned,
+            },
+            LIST_FEEDS_ENDPOINT,
+            referer,
+        )
+        return data.get("items", [])
 
     async def list_messages(
         self,
