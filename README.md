@@ -233,6 +233,35 @@ for item in items:
 
 ---
 
+### pin chat
+
+```python
+result = await api.pin_chat(chat_id)
+print(result)
+```
+
+---
+
+### unpin chat
+
+```python
+result = await api.unpin_chat(chat_id)
+print(result)
+```
+
+---
+
+### list pins
+
+```python
+pins = await api.list_pins(page_size=50)
+for pin in pins:
+    chat = pin["chat"]
+    print(f"{chat['name']} ({chat['id']})")
+```
+
+---
+
 ### list messages
 
 ```python

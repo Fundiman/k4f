@@ -13,6 +13,9 @@ GET_CHAT_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/GetChat"
 UPDATE_CHAT_ENDPOINT = "/apiv2/kimi.chat.v1.ChatService/UpdateChat"
 DELETE_CHAT_ENDPOINT = "/apiv2/kimi.chat.v1.ChatService/DeleteChat"
 CANCEL_CHAT_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/CancelChat"
+PIN_RESOURCE_ENDPOINT = "/apiv2/kimi.gateway.pin.v1.PinService/PinResource"
+UNPIN_RESOURCE_ENDPOINT = "/apiv2/kimi.gateway.pin.v1.PinService/UnpinResource"
+LIST_PINS_ENDPOINT = "/apiv2/kimi.gateway.pin.v1.PinService/ListPinResources"
 LIST_FEEDS_ENDPOINT = "/apiv2/kimi.gateway.feed.v1.FeedService/ListFeeds"
 LIST_MSGS_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages"
 FILE_UPLOAD_ENDPOINT = "/apiv2-files/file/upload"
@@ -255,6 +258,37 @@ class KimiAPI:
             CANCEL_CHAT_ENDPOINT,
             referer,
         )
+
+    async def pin_chat(self, chat_id: str) -> dict:
+        referer = f"{BASE_URL}/"
+        return await self._send_json(
+            {"resource_type": "PIN_RESOURCE_TYPE_CHAT", "resource_id": chat_id},
+            PIN_RESOURCE_ENDPOINT,
+            referer,
+        )
+
+    async def unpin_chat(self, chat_id: str) -> dict:
+        referer = f"{BASE_URL}/"
+        return await self._send_json(
+            {"resource_type": "PIN_RESOURCE_TYPE_CHAT", "resource_id": chat_id},
+            UNPIN_RESOURCE_ENDPOINT,
+            referer,
+        )
+
+    async def list_pins(
+        self,
+        page_size: int = 100,
+        resource_types: Optional[List[str]] = None,
+    ) -> List[dict]:
+        if resource_types is None:
+            resource_types = ["PIN_RESOURCE_TYPE_PROJECT", "PIN_RESOURCE_TYPE_CHAT"]
+        referer = f"{BASE_URL}/"
+        data = await self._send_json(
+            {"page_size": page_size, "resource_types": resource_types},
+            LIST_PINS_ENDPOINT,
+            referer,
+        )
+        return data.get("resources", [])
 
     async def get_chat(self, chat_id: str) -> dict:
         referer = f"{BASE_URL}/chat/{chat_id}"
