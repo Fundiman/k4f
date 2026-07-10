@@ -12,6 +12,7 @@ CHAT_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/Chat"
 GET_CHAT_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/GetChat"
 UPDATE_CHAT_ENDPOINT = "/apiv2/kimi.chat.v1.ChatService/UpdateChat"
 DELETE_CHAT_ENDPOINT = "/apiv2/kimi.chat.v1.ChatService/DeleteChat"
+CANCEL_CHAT_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/CancelChat"
 LIST_FEEDS_ENDPOINT = "/apiv2/kimi.gateway.feed.v1.FeedService/ListFeeds"
 LIST_MSGS_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages"
 FILE_UPLOAD_ENDPOINT = "/apiv2-files/file/upload"
@@ -91,6 +92,7 @@ class KimiAPI:
 
         self._last_user_msg: Dict[str, str] = {}
         self.last_chat_id: str = ""
+        self.last_message_id: str = ""
 
         self.client = httpx.AsyncClient(
             base_url=BASE_URL,
@@ -208,6 +210,8 @@ class KimiAPI:
             msg_obj = obj.get("message") or {}
             if msg_obj.get("role") == "user" and msg_obj.get("id"):
                 user_msg_id = msg_obj["id"]
+            if msg_obj.get("role") == "assistant" and msg_obj.get("id"):
+                self.last_message_id = msg_obj["id"]
 
             if _is_done(obj):
                 final_chat = resolved_chat or chat_id
@@ -237,6 +241,20 @@ class KimiAPI:
         ):
             full_text += text
             yield {"content": text, "full_content": full_text}
+
+    async def stop_stream(
+        self,
+        chat_id: str = "",
+        message_id: str = "",
+    ) -> dict:
+        chat_id = chat_id or self.last_chat_id
+        message_id = message_id or self.last_message_id
+        referer = f"{BASE_URL}/chat/{chat_id}"
+        return await self._send_json(
+            {"chat_id": chat_id, "message_id": message_id},
+            CANCEL_CHAT_ENDPOINT,
+            referer,
+        )
 
     async def get_chat(self, chat_id: str) -> dict:
         referer = f"{BASE_URL}/chat/{chat_id}"

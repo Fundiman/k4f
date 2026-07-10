@@ -199,6 +199,26 @@ print(result)
 
 ---
 
+### stop stream
+
+Stop an active response mid-generation. The `chat_id` and `message_id` are automatically tracked from the last `chat_stream` call:
+
+```python
+result = await api.stop_stream()
+print(result)
+```
+
+A specific `chat_id` and `message_id` can also be passed directly:
+
+```python
+result = await api.stop_stream(
+    chat_id="chat_id_here",
+    message_id="message_id_here",
+)
+```
+
+---
+
 ### list feeds (conversations)
 
 ```python
