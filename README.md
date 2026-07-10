@@ -10,6 +10,9 @@ A lightweight async Python client for interacting with Kimi (Moonshot AI) chat i
 > [!WARNING]
 > This project is built around reverse-engineered infrastructure behavior. Use responsibly and be aware that API changes may break functionality without notice.
 
+> [!NOTE]
+> Despite the similar naming convention, **kimi4free** is an independent project built from the ground up — not a fork of [SertraFurr/kimi4free](https://github.com/SertraFurr/kimi4free) or any other existing wrapper. The naming similarity is purely stylistic.
+
 ---
 
 ## overview
