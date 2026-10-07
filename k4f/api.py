@@ -1,9 +1,9 @@
-import json, base64
+import asyncio, base64, json, time
 from typing import AsyncGenerator, Optional, Dict, Any, List
 import httpx
 
 from .connect import encode_unary, read_streamed_frames
-from .models import ChatRequest, Message, TextBlock, ChatOptions
+from .models import ChatRequest, Message, TextBlock
 
 
 BASE_URL = "https://www.kimi.com"
@@ -20,13 +20,14 @@ LIST_FEEDS_ENDPOINT = "/apiv2/kimi.gateway.feed.v1.FeedService/ListFeeds"
 LIST_MSGS_ENDPOINT = "/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages"
 FILE_UPLOAD_ENDPOINT = "/apiv2-files/file/upload"
 FILE_PARSE_PROGRESS_ENDPOINT = "/apiv2-files/kimi.gateway.file.v1.FileService/GetFileParseProgress"
+MODELS_ENDPOINT = "/apiv2/kimi.gateway.config.v1.ConfigService/GetAvailableModels"
+REFRESH_TOKEN_ENDPOINT = "https://auth.kimi.ai/api/account.gateway.v1.AuthService/RefreshToken"
+
+REFRESH_BUFFER = 60
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 
 class KimiError(Exception):
-    pass
-
-
-class AuthError(KimiError):
     pass
 
 
@@ -34,6 +35,10 @@ class APIError(KimiError):
     def __init__(self, message: str, status_code: Optional[int] = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+class AuthError(APIError):
+    pass
 
 
 def _decode_jwt(token: str) -> dict:
@@ -73,29 +78,41 @@ def _is_done(obj: dict) -> bool:
 class KimiAPI:
     def __init__(
         self,
-        auth_token: str,
+        auth_token: str = "",
         cookies: Optional[dict] = None,
         device_id: str = "",
         session_id: str = "",
         traffic_id: str = "",
         shield_data: str = "",
         language: str = "en-US",
+        refresh_token: str = "",
     ):
+        if not auth_token and not refresh_token:
+            raise ValueError("KimiAPI requires an auth_token and/or a refresh_token")
+
         self.auth_token = auth_token
+        self.refresh_token = refresh_token
         self.cookies = cookies or {}
-        if "kimi-auth" not in self.cookies:
+        if auth_token and "kimi-auth" not in self.cookies:
             self.cookies["kimi-auth"] = auth_token
 
-        jwt = _decode_jwt(auth_token)
-        self.device_id = device_id or jwt.get("device_id", "")
-        self.session_id = session_id or jwt.get("ssid", "")
-        self.traffic_id = traffic_id or jwt.get("sub", "")
+        self._user_device_id = device_id
+        self._user_session_id = session_id
+        self._user_traffic_id = traffic_id
+
+        claims = _decode_jwt(auth_token) if auth_token else {}
+        self._access_exp: Optional[int] = claims.get("exp") if claims else None
+        base_claims = claims or _decode_jwt(refresh_token)
+        self.device_id = device_id or base_claims.get("device_id", "")
+        self.session_id = session_id or base_claims.get("ssid", "")
+        self.traffic_id = traffic_id or base_claims.get("sub", "")
         self.shield_data = shield_data
         self.language = language
 
         self._last_user_msg: Dict[str, str] = {}
         self.last_chat_id: str = ""
         self.last_message_id: str = ""
+        self._refresh_lock = asyncio.Lock()
 
         self.client = httpx.AsyncClient(
             base_url=BASE_URL,
@@ -120,7 +137,7 @@ class KimiAPI:
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "user-agent": USER_AGENT,
             "x-language": self.language,
             "x-msh-platform": "web",
             "x-msh-version": "1.0.0",
@@ -137,39 +154,186 @@ class KimiAPI:
             headers["x-traffic-id"] = self.traffic_id
         return headers
 
-    async def _send_connect(self, body: dict, endpoint: str, referer: str) -> AsyncGenerator[bytes, None]:
-        framed = encode_unary(json.dumps(body).encode(), flag_byte=0x00)
+    def _access_expired(self) -> bool:
+        if self._access_exp is None:
+            return True
+        return time.time() >= self._access_exp - REFRESH_BUFFER
 
-        async with self.client.stream(
-            "POST",
-            endpoint,
-            headers=self._base_headers(referer),
-            cookies=self.cookies,
-            content=framed,
-        ) as response:
+    def _apply_tokens(self, access_token: str, refresh_token: str = "") -> None:
+        self.auth_token = access_token
+        if refresh_token:
+            self.refresh_token = refresh_token
+        self.cookies["kimi-auth"] = access_token
+
+        claims = _decode_jwt(access_token)
+        exp = claims.get("exp")
+        self._access_exp = exp if isinstance(exp, int) else None
+        if claims:
+            self.device_id = self._user_device_id or claims.get("device_id", "") or self.device_id
+            self.session_id = self._user_session_id or claims.get("ssid", "") or self.session_id
+            self.traffic_id = self._user_traffic_id or claims.get("sub", "") or self.traffic_id
+
+    async def refresh_tokens(self, force: bool = False) -> Dict[str, str]:
+        """Exchange the refresh token for a fresh access token.
+
+        Kimi rotates refresh tokens: persist the returned ``refresh_token``
+        (also available as ``api.refresh_token``) after every refresh.
+        """
+        if not self.refresh_token:
+            raise AuthError("no refresh_token configured", 401)
+
+        async with self._refresh_lock:
+            if not force and not self._access_expired():
+                return {"access_token": self.auth_token, "refresh_token": self.refresh_token}
+
+            headers = {
+                "accept": "*/*",
+                "content-type": "application/json",
+                "origin": BASE_URL,
+                "referer": f"{BASE_URL}/",
+                "user-agent": USER_AGENT,
+                "x-msh-platform": "web",
+                "x-msh-version": "1.0.0",
+            }
+            if self.device_id:
+                headers["x-msh-device-id"] = self.device_id
+            if self.session_id:
+                headers["x-msh-session-id"] = self.session_id
+            if self.traffic_id:
+                headers["x-traffic-id"] = self.traffic_id
+
+            try:
+                response = await self.client.post(
+                    REFRESH_TOKEN_ENDPOINT,
+                    headers=headers,
+                    json={"refresh_token": self.refresh_token},
+                )
+            except httpx.HTTPError as e:
+                raise APIError(f"token refresh failed: {e}") from e
+
             if response.status_code != 200:
-                text = await response.aread()
+                if response.status_code in (401, 403):
+                    raise AuthError(
+                        f"refresh token rejected: HTTP {response.status_code}: {response.text[:500]}",
+                        response.status_code,
+                    )
                 raise APIError(
-                    f"HTTP {response.status_code}: {text[:500]}",
+                    f"token refresh failed: HTTP {response.status_code}: {response.text[:500]}",
                     response.status_code,
                 )
 
-            async for flag, payload in read_streamed_frames(response.aiter_bytes()):
-                if payload:
-                    yield payload
+            data = response.json()
+            access = data.get("accessToken", "")
+            if not access:
+                raise AuthError(f"unexpected refresh response: {response.text[:500]}", 401)
 
-    async def _send_json(self, body: dict, endpoint: str, referer: str) -> dict:
-        response = await self.client.post(
-            endpoint,
-            headers=self._base_headers(referer, content_type="application/json"),
-            cookies=self.cookies,
-            json=body,
-        )
-        if response.status_code != 200:
-            raise APIError(
-                f"HTTP {response.status_code}: {response.text[:500]}",
+            self._apply_tokens(access, data.get("refreshToken", ""))
+            return {"access_token": access, "refresh_token": self.refresh_token}
+
+    async def _ensure_token(self) -> None:
+        if self._access_exp is None:
+            if not self.auth_token:
+                if self.refresh_token:
+                    await self.refresh_tokens()
+                else:
+                    raise AuthError("no auth token configured", 401)
+            return
+
+        now = time.time()
+        if now < self._access_exp - REFRESH_BUFFER:
+            return
+        if self.refresh_token:
+            await self.refresh_tokens()
+            return
+        if now >= self._access_exp:
+            raise AuthError(
+                "access token has expired; pass a refresh_token to auto-renew it",
+                401,
+            )
+
+    def _raise_for_status(self, response: httpx.Response, prefix: str = "") -> None:
+        if response.status_code in (401, 403):
+            raise AuthError(
+                f"{prefix}HTTP {response.status_code}: {response.text[:500]}",
                 response.status_code,
             )
+        if response.status_code != 200:
+            raise APIError(
+                f"{prefix}HTTP {response.status_code}: {response.text[:500]}",
+                response.status_code,
+            )
+
+    async def _post(
+        self,
+        endpoint: str,
+        referer: str,
+        *,
+        json: Optional[dict] = None,
+        files: Optional[dict] = None,
+        prefix: str = "",
+    ) -> httpx.Response:
+        """POST with proactive token refresh and one reactive retry on 401/403."""
+        await self._ensure_token()
+        for attempt in range(2):
+            if files is not None:
+                headers = self._base_headers(referer, content_type="")
+                headers["accept"] = "application/json, text/plain, */*"
+                headers.pop("content-type", None)
+            else:
+                headers = self._base_headers(referer, content_type="application/json")
+
+            kwargs: Dict[str, Any] = {"files": files} if files is not None else {"json": json}
+            response = await self.client.post(
+                endpoint,
+                headers=headers,
+                cookies=self.cookies,
+                **kwargs,
+            )
+            if response.status_code in (401, 403) and attempt == 0 and self.refresh_token:
+                await self.refresh_tokens(force=True)
+                continue
+            self._raise_for_status(response, prefix)
+            return response
+
+        return response
+
+    async def _send_connect(self, body: dict, endpoint: str, referer: str) -> AsyncGenerator[bytes, None]:
+        attempt = 0
+        while True:
+            await self._ensure_token()
+            framed = encode_unary(json.dumps(body).encode(), flag_byte=0x00)
+
+            async with self.client.stream(
+                "POST",
+                endpoint,
+                headers=self._base_headers(referer),
+                cookies=self.cookies,
+                content=framed,
+            ) as response:
+                if response.status_code in (401, 403):
+                    text = await response.aread()
+                    if attempt == 0 and self.refresh_token:
+                        attempt += 1
+                        await self.refresh_tokens(force=True)
+                        continue
+                    raise AuthError(
+                        f"HTTP {response.status_code}: {text[:500]}",
+                        response.status_code,
+                    )
+                if response.status_code != 200:
+                    text = await response.aread()
+                    raise APIError(
+                        f"HTTP {response.status_code}: {text[:500]}",
+                        response.status_code,
+                    )
+
+                async for flag, payload in read_streamed_frames(response.aiter_bytes()):
+                    if payload:
+                        yield payload
+            return
+
+    async def _send_json(self, body: dict, endpoint: str, referer: str) -> dict:
+        response = await self._post(endpoint, referer, json=body)
         return response.json()
 
     async def chat(
@@ -199,6 +363,8 @@ class KimiAPI:
 
         resolved_chat = ""
         user_msg_id = ""
+        if chat_id:
+            self.last_chat_id = chat_id
 
         async for payload in self._send_connect(body, CHAT_ENDPOINT, referer):
             try:
@@ -209,6 +375,7 @@ class KimiAPI:
             chat_obj = obj.get("chat") or {}
             if chat_obj.get("id") and not resolved_chat:
                 resolved_chat = chat_obj["id"]
+                self.last_chat_id = resolved_chat
 
             msg_obj = obj.get("message") or {}
             if msg_obj.get("role") == "user" and msg_obj.get("id"):
@@ -349,6 +516,15 @@ class KimiAPI:
         )
         return data.get("messages", [])
 
+    async def get_available_models(self) -> dict:
+        """Return the model catalogue.
+
+        The response contains ``availableModels`` (list of model dicts),
+        ``defaultScenario``, ``defaultAgentModel`` and ``defaultChatModel``.
+        """
+        referer = f"{BASE_URL}/"
+        return await self._send_json({}, MODELS_ENDPOINT, referer)
+
     async def upload_file(
         self,
         file_path: str,
@@ -371,38 +547,25 @@ class KimiAPI:
             content_type = "application/pdf"
 
         files = {"file": (filename, file_data, content_type)}
-        h = self._base_headers(f"{BASE_URL}/chat", content_type="")
-        h["accept"] = "application/json, text/plain, */*"
-        h.pop("content-type", None)
-        r = await self.client.post(
+        response = await self._post(
             FILE_UPLOAD_ENDPOINT,
-            headers=h,
-            cookies=self.cookies,
+            f"{BASE_URL}/chat",
             files=files,
+            prefix="Upload ",
         )
-        if r.status_code != 200:
-            raise APIError(
-                f"Upload HTTP {r.status_code}: {r.text[:500]}",
-                r.status_code,
-            )
-        return r.json()
+        return response.json()
 
     async def get_file_parse_progress(
         self,
         file_ids: list[str],
     ) -> list[dict]:
-        r = await self.client.post(
+        response = await self._post(
             FILE_PARSE_PROGRESS_ENDPOINT,
-            headers=self._base_headers(f"{BASE_URL}/chat", content_type="application/json"),
-            cookies=self.cookies,
+            f"{BASE_URL}/chat",
             json={"file_ids": file_ids},
+            prefix="ParseProgress ",
         )
-        if r.status_code != 200:
-            raise APIError(
-                f"ParseProgress HTTP {r.status_code}: {r.text[:500]}",
-                r.status_code,
-            )
-        return r.json().get("progresses", [])
+        return response.json().get("progresses", [])
 
     async def close(self):
         await self.client.aclose()

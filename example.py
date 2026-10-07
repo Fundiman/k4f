@@ -5,7 +5,12 @@ from k4f import KimiAPI
 async def main():
     api = KimiAPI(
         auth_token="your-kimi-auth-jwt-here",
+        # refresh_token="your-refresh-token-here",  # optional: renews the access token automatically
     )
+
+    # List available models
+    data = await api.get_available_models()
+    print("Models:", [m["displayName"] for m in data["availableModels"]])
 
     # Upload a file
     print("Uploading file...")

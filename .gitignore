@@ -10,3 +10,5 @@ build/
 *.egg
 *.ignore
 test_*
+cookies.json
+tokens.json

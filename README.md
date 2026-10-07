@@ -23,9 +23,12 @@ A lightweight async Python client for interacting with Kimi (Moonshot AI) chat i
 * streaming response parsing via the connect protocol (unary frames)
 * file upload with parse progress tracking
 * session-based conversation handling with chat management
+* refresh token auth with **automatic access-token renewal** (or bring your own access token)
+* available model listing (`get_available_models`)
+* mid-stream cancellation (`stop_stream`)
 * JWT token decoding for automatic credential extraction
 * browser cookie extraction for seamless authentication
-* JSON cookie storage and retrieval
+* JSON cookie/token storage and retrieval
 * structured error handling with specific exception types
 
 ---
@@ -60,7 +63,7 @@ pip install -r requirements.txt
 ## quick start
 
 > [!IMPORTANT]
-> Before using the API client, you need a valid auth token from Kimi.
+> Before using the API client, you need a credential from Kimi: either a short-lived **access token** or a long-lived **refresh token** (recommended — k4f renews the access token for you). See [authentication](#authentication).
 
 ```python
 import asyncio
@@ -68,6 +71,8 @@ from k4f import KimiAPI
 
 async def main():
     api = KimiAPI(auth_token="your-kimi-auth-jwt-here")
+    # or, so expired access tokens are renewed automatically:
+    # api = KimiAPI(refresh_token="your-refresh-token-here")
     
     async for chunk in api.chat_stream(content="Hello Kimi!"):
         print(chunk["content"], end="", flush=True)
@@ -76,6 +81,68 @@ async def main():
 
 asyncio.run(main())
 ```
+
+---
+
+## authentication
+
+k4f accepts either credential — both work on their own:
+
+| credential | lifetime | where it lives |
+|---|---|---|
+| **access token** (`auth_token=`) | ~15 minutes | cookie `kimi-auth`, localStorage `access_token`, `authorization: Bearer ...` header |
+| **refresh token** (`refresh_token=`) | ~90 days | localStorage `refresh_token` |
+
+### getting the tokens (browser devtools)
+
+> [!NOTE]
+> This is the one manual step — everything after it is automatic.
+
+1. log in to [kimi.com](https://www.kimi.com) (or kimi.ai)
+2. press `F12` → **Application** tab → **Local Storage** → `https://www.kimi.com`
+3. copy the value of `refresh_token` (and optionally `access_token`)
+
+Alternative: **Network** tab → any `/apiv2/...` request → request headers → copy the `authorization: Bearer ...` value (that's the access token).
+
+### using a refresh token (recommended)
+
+```python
+from k4f import KimiAPI
+
+api = KimiAPI(refresh_token="paste-refresh-token-here")
+# no access token needed — k4f fetches one on first use
+# and renews it automatically whenever it is about to expire
+```
+
+If the server rejects a request with `401`, k4f refreshes once and retries transparently. If the refresh token itself is rejected, `AuthError` is raised.
+
+> [!IMPORTANT]
+> Kimi **rotates** refresh tokens: every exchange returns a new one. Persist the current value (also exposed as `api.refresh_token`) after refreshing:
+
+```python
+from k4f.auth import save_tokens, load_tokens
+
+tokens = load_tokens("tokens.json") or {}
+api = KimiAPI(
+    auth_token=tokens.get("auth_token", ""),
+    refresh_token=tokens.get("refresh_token", ""),
+)
+
+# ... use api ...
+
+save_tokens("tokens.json", api.auth_token, api.refresh_token)
+```
+
+### using an access token only
+
+```python
+api = KimiAPI(auth_token="paste-access-token-here")
+```
+
+Works until the token expires (~15 minutes). Afterwards `AuthError` is raised telling you to supply a refresh token instead.
+
+> [!NOTE]
+> Refresh requests echo your `x-msh-device-id` / `x-msh-session-id` headers so device identity survives rotation. If your refresh token no longer carries them, pass `device_id=` / `session_id=` explicitly (grab both from any devtools request header) — once provided they stick for every later refresh.
 
 ---
 
@@ -89,7 +156,7 @@ k4f/
 │   ├── api.py               # async Kimi API client
 │   ├── models.py            # data models (ChatRequest, Message, etc.)
 │   ├── connect.py           # connect protocol encoder/decoder
-│   └── auth.py              # cookie extraction & storage
+│   └── auth.py              # cookie/token extraction & storage
 │
 ├── example.py               # usage examples
 ├── requirements.txt         # dependencies
@@ -105,11 +172,15 @@ k4f/
 ```python
 from k4f import KimiAPI
 
+# access token only
 api = KimiAPI(auth_token="your_token")
+
+# or refresh token (auto-renews the access token)
+api = KimiAPI(refresh_token="your_refresh_token")
 ```
 
 > [!NOTE]
-> The auth token is obtained after logging into Kimi. Extract it from browser developer tools or use the auth helpers to extract from cookies.
+> See [authentication](#authentication) for how to grab the tokens from your browser and how rotation works.
 
 ---
 
@@ -216,6 +287,25 @@ result = await api.stop_stream(
     message_id="message_id_here",
 )
 ```
+
+> [!NOTE]
+> The response is an empty dict (`{}`). Kimi has **no resume endpoint** — a stopped stream is finished for good; to continue the conversation, send a follow-up message with `chat_id=api.last_chat_id`.
+
+---
+
+### list available models
+
+```python
+data = await api.get_available_models()
+
+for model in data["availableModels"]:
+    print(f"{model['key']}: {model['displayName']} — {model['description']}")
+
+print(data["defaultChatModel"])  # e.g. "k2d6-chat"
+```
+
+> [!NOTE]
+> The raw response also contains `defaultScenario` and `defaultAgentModel`. Model entries include `reasoningEffortOptions` and `contextLengthOptions` when applicable.
 
 ---
 
@@ -324,6 +414,8 @@ Async client for streaming chat interaction with:
 - streaming response parsing for text extraction
 - file upload with progress tracking
 - chat management and message listing
+- automatic access-token renewal (refresh token exchange, one 401 retry)
+- model catalogue (`get_available_models`) and stream cancellation (`stop_stream`)
 - automatic credential extraction from JWT
 
 ### 2. Connect layer (`connect.py`)
@@ -336,6 +428,8 @@ Low-level protocol handler for Kimi's connect protocol:
 ### 3. Auth layer (`auth.py`)
 
 Authentication and credential management:
+- refresh token exchange against Kimi's auth service (rotating tokens)
+- access/refresh token persistence (`load_tokens` / `save_tokens`)
 - browser cookie extraction (Chrome, Firefox, etc.)
 - JSON cookie storage and retrieval
 - automatic `kimi-auth` token handling
@@ -363,13 +457,18 @@ from k4f import KimiError, AuthError, APIError
 
 try:
     await api.chat_stream(content="Hello")
-except AuthError:
-    print("Invalid or expired auth token")
+except AuthError as e:
+    # expired access token (no refresh_token configured),
+    # rejected refresh token, or any 401/403 response
+    print(f"Auth failed ({e.status_code}): {e}")
 except APIError as e:
     print(f"API error {e.status_code}: {e}")
 except KimiError as e:
     print(f"General Kimi error: {e}")
 ```
+
+> [!NOTE]
+> `AuthError` subclasses `APIError`, so catching `APIError` also catches auth failures — put `except AuthError` first.
 
 ---
 
